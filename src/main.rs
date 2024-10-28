@@ -1,37 +1,14 @@
 use clap::Parser;
-use parking_lot::RwLock;
-use pprefox_rs::firefox_write;
+use directories::ProjectDirs;
 use pprefox_rs::http::{http_server, AppState};
 use pprefox_rs::json::*;
-use pprefox_rs::nmh_files_setup;
 use std::collections::{HashMap, VecDeque};
-use std::io;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(short, long)]
     serve: bool,
-}
-
-// Separate thread for reading only
-async fn read_loop(output_channels: Arc<RwLock<HashMap<String, UnboundedSender<ExtensionResponse>>>>) {
-    loop {
-        if let Ok(input) = read().await {
-            let decoded_input = String::from_utf8_lossy(&input).to_string();
-            if let Ok(resp) = serde_json::from_str::<ExtensionResponse>(&decoded_input) {
-                let output_channels = output_channels.read();
-                if let Some(tx) = output_channels.get(&resp.uuid) {
-                    // Send the browser's response to a channel waiting for it
-                    let _ = tx.send(resp);
-                } // otherwise, there was a repeat response
-                drop(output_channels);
-            }
-        }
-    }
 }
 
 #[tokio::main]
@@ -46,7 +23,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Run HTTP server in a separate thread
         http_server(state.clone()).unwrap();
         // Run read loop in a separate thread
-        tokio::spawn(read_loop(state.incoming_receivers));
+        natemess::io::spawn_read_loop(move |input| {
+            let output_channels = state.incoming_receivers.clone();
+            let decoded_input = String::from_utf8_lossy(&input).to_string();
+            if let Ok(resp) = serde_json::from_str::<ExtensionResponse>(&decoded_input) {
+                let output_channels = output_channels.read();
+                if let Some(tx) = output_channels.get(&resp.uuid) {
+                    // Send the browser's response to a channel waiting for it
+                    let _ = tx.send(resp);
+                } // otherwise, there was a repeat response
+                drop(output_channels);
+            }
+        });
         loop {
             // Main thread will send any messages in the outbound queue
             if let Some(l) = state.outgoing.try_read() {
@@ -55,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(mut l) = state.outgoing.try_write() {
                         // Serialize and send the first request
                         if let Some(outgoing_request) = l.pop_front() {
-                            write(
+                            natemess::io::write(
                                 &outgoing_request
                                     .1
                                     .serialize(outgoing_request.0.to_string())
@@ -76,28 +64,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // TODO: Allow the user to pick that path themselves
         let batch_contents = "@echo off\r\n".to_string() + exe_path.to_str().unwrap() + " -s";
         // Write host JSON and batch file to AppData
-        let host_path = nmh_files_setup(&batch_contents).unwrap();
+        // Directories to store the config and serve script
+        let proj_dirs = ProjectDirs::from("", "duck", "pprefox_rs")
+            .expect("Could not initialize project directories for pprefox-rs");
+
+        std::fs::create_dir_all(proj_dirs.data_dir())?;
+
+        let host_path = proj_dirs.data_dir().join("host.json");
+        let script_path = proj_dirs.data_dir().join("nmhhost.bat");
+
+        
+        natemess::install::nmh_files_setup(
+            &batch_contents,
+            host_path.clone(),
+            script_path,
+            "pprefox@duckfromdiscord.github.io",
+            "pprefox_rs",
+            "pprefox_rs",
+        )
+        .unwrap();
+
         // Set up registry entries
-        Ok(firefox_write(host_path.to_str().unwrap())?)
+        Ok(natemess::install::firefox_registry_setup(
+            host_path.to_str().unwrap(),
+            "pprefox_rs",
+        )?)
     }
-}
-
-// Async read from stdin
-async fn read() -> io::Result<Vec<u8>> {
-    let mut stdin = tokio::io::stdin();
-    let mut length = [0; 4];
-    stdin.read_exact(&mut length).await?;
-    let mut buffer = vec![0; u32::from_ne_bytes(length) as usize];
-    stdin.read_exact(&mut buffer).await?;
-    Ok(buffer)
-}
-
-// Async write to stdout
-async fn write(message: &[u8]) -> io::Result<()> {
-    let mut stdout = tokio::io::stdout();
-    let length = message.len() as u32;
-    stdout.write_all(&length.to_ne_bytes()).await?;
-    stdout.write_all(message).await?;
-    stdout.flush().await?;
-    Ok(())
 }
