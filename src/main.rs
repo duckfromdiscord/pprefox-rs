@@ -73,7 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let host_path = proj_dirs.data_dir().join("host.json");
         let script_path = proj_dirs.data_dir().join("nmhhost.bat");
 
-        
         natemess::install::nmh_files_setup(
             &batch_contents,
             host_path.clone(),

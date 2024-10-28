@@ -11,6 +11,8 @@ use uuid::Uuid;
 pub enum RequestType {
     ListThemes,
     SetTheme(String),
+    ListTabs(TabQuery),
+    SwapTab(u16),
 }
 
 impl RequestType {
@@ -21,6 +23,8 @@ impl RequestType {
                     uuid,
                     command: "list_themes".to_string(),
                     theme_id: None,
+                    query: None,
+                    index: None,
                 };
                 Ok(serde_json::to_string(&req)?.as_bytes().to_vec())
             }
@@ -29,6 +33,28 @@ impl RequestType {
                     uuid,
                     command: "set_theme".to_string(),
                     theme_id: Some(theme_id.to_string()),
+                    query: None,
+                    index: None,
+                };
+                Ok(serde_json::to_string(&req)?.as_bytes().to_vec())
+            }
+            RequestType::ListTabs(query) => {
+                let req = ExtensionRequest {
+                    uuid,
+                    command: "list_tabs".to_string(),
+                    theme_id: None,
+                    query: Some(query.clone()),
+                    index: None,
+                };
+                Ok(serde_json::to_string(&req)?.as_bytes().to_vec())
+            }
+            RequestType::SwapTab(tab) => {
+                let req = ExtensionRequest {
+                    uuid,
+                    command: "select_tab".to_string(),
+                    theme_id: None,
+                    query: None,
+                    index: Some(*tab),
                 };
                 Ok(serde_json::to_string(&req)?.as_bytes().to_vec())
             }
@@ -84,12 +110,35 @@ async fn set_theme(info: web::Query<SetThemeInfo>, data: web::Data<AppState>) ->
     HttpResponse::Ok().finish()
 }
 
+#[get("/get_tabs")]
+async fn get_tabs(info: web::Query<TabQuery>, data: web::Data<AppState>) -> impl Responder {
+    let req_id = uuid::Uuid::new_v4();
+    match push_request_and_wait(req_id, data, RequestType::ListTabs(info.0)).await {
+        Some(extresp) => HttpResponse::Ok().body(serde_json::to_string(&extresp.tabs).unwrap()),
+        None => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetTab {
+    id: u16,
+}
+
+#[get("/swap_tab")]
+async fn swap_tab(info: web::Query<SetTab>, data: web::Data<AppState>) -> impl Responder {
+    let req_id = uuid::Uuid::new_v4();
+    push_request(req_id, data, RequestType::SwapTab(info.id));
+    HttpResponse::Ok().finish()
+}
+
 pub fn http_server(state: AppState) -> std::io::Result<()> {
     let state = web::Data::new(state);
     let server = HttpServer::new(move || {
         App::new()
             .service(get_themes)
             .service(set_theme)
+            .service(get_tabs)
+            .service(swap_tab)
             .app_data(state.clone())
     })
     .bind(("127.0.0.1", 8080))?;
